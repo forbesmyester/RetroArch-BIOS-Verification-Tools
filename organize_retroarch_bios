@@ -1,0 +1,133 @@
+#!/bin/bash
+
+OPTIND=1
+BIOS_PATH=""
+RETROARCH_DOCS_REPO_PATH=""
+TEMP=""
+
+declare -A COMPLETED_LOCAL_FILES
+
+cleanup() {
+    if [ ! -z "$TEMP" ]; then
+        rm -rf "$TEMP"
+    fi
+}
+trap cleanup EXIT
+
+show_help() {
+    echo "$0 [-d RETROARCH_DOCS_REPO_PATH] [-b BIOS_PATH] [-h]"
+    echo ""
+    echo "-d = The path to the RetroArch docs repository (from https://github.com/libretro/docs)"
+    echo "-b = The path to where the BIOS files are stored"
+    echo "-h = Show this help"
+    echo ""
+}
+
+while getopts "hd:b:" opt; do
+    case "$opt" in
+        h)
+            show_help
+            exit 0
+            ;;
+        b)  BIOS_PATH="$OPTARG"
+            ;;
+        d)  RETROARCH_DOCS_REPO_PATH="$OPTARG"
+            ;;
+    esac
+done
+shift $(( OPTIND - 1 ))
+
+if [ -z "$BIOS_PATH" ] || [ -z "$RETROARCH_DOCS_REPO_PATH" ]; then
+    show_help
+    exit 1
+fi
+
+set -euo pipefail
+IFS=$'\n\t'
+TEMP="$(mktemp -d)"
+
+echo -e "local_md5sum\tlocal_filename" > "${TEMP}/local"
+find "$BIOS_PATH" -type f | parallel --halt now,fail=1 md5sum {} | sed 's/ \+/\t/' >> "${TEMP}/local"
+awk -F "|" -f extract_tables.awk "${RETROARCH_DOCS_REPO_PATH}"/docs/library/*.md >> "${TEMP}/verified"
+
+
+DESTINATION_PATH="${BIOS_PATH}/_verified"
+mkdir -p "$DESTINATION_PATH"
+UNVERIFIED_PATH="${BIOS_PATH}/_unverified"
+mkdir -p "$UNVERIFIED_PATH"
+
+GOOD_FILES="$(mlr --itsv --ojsonl join -f "${TEMP}/verified" -j verified_md5sum -r local_md5sum "${TEMP}/local")"
+for O in $GOOD_FILES; do
+
+    LOCAL_FILENAME="$(echo "$O" | jq -r .local_filename)"
+    VERIFIED_MD5SUM="$(echo $O | jq -r .verified_md5sum)"
+    DESTINATION_FILE="$DESTINATION_PATH/$VERIFIED_MD5SUM"
+    LOCAL_MD5SUM="$(echo $O | jq -r .local_md5sum)"
+
+    if [ ! ${COMPLETED_LOCAL_FILES["$LOCAL_FILENAME"]+_} ] && [ "$(realpath "$LOCAL_FILENAME")" != "$(realpath "$DESTINATION_FILE")" ]; then
+        mv "${LOCAL_FILENAME}" "$DESTINATION_FILE"
+    fi
+
+    COMPLETED_LOCAL_FILES["$LOCAL_FILENAME"]=1
+done
+
+BAD_FILES="$(mlr --itsv --ojsonl join -u --ur --np -f "${TEMP}/verified" -j md5sum -r local_md5sum -l verified_md5sum "${TEMP}/local")"
+for O in $BAD_FILES; do
+
+    LOCAL_FILENAME="$(echo "$O" | jq -r .local_filename)"
+    DESTINATION_FILE="$UNVERIFIED_PATH/$(basename "$LOCAL_FILENAME")"
+    if [ "$(realpath "$LOCAL_FILENAME")" != "$(realpath "$DESTINATION_FILE")" ]; then
+        mv "${LOCAL_FILENAME}" "$DESTINATION_FILE"
+    fi
+
+done
+
+for O in $GOOD_FILES; do
+    # Direct from JSON
+    VERIFIED_MD5SUM="$(echo $O | jq -r .verified_md5sum)"
+    VERIFIED_SYSTEM="$(echo "$O" | jq -r .verified_system)"
+    VERIFIED_FILENAME="$(echo "$O" | jq -r .verified_filename)"
+    LOCAL_MD5SUM="$(echo $O | jq -r .local_md5sum)"
+    LOCAL_FILENAME="$(echo "$O" | jq -r .local_filename)"
+
+    # My Locations
+    LINK_SYSTEM_SOURCE="${BIOS_PATH}/${VERIFIED_SYSTEM}/${VERIFIED_FILENAME}"
+    LINK_SOURCE="${BIOS_PATH}/${VERIFIED_FILENAME}"
+    DESTINATION_FILE="$DESTINATION_PATH/$VERIFIED_MD5SUM"
+
+    mkdir -p "$(dirname $LINK_SYSTEM_SOURCE)"
+    mkdir -p "$(dirname $LINK_SOURCE)"
+    [ ! -L "$LINK_SYSTEM_SOURCE" ] && ln -s "../_verified/${VERIFIED_MD5SUM}" "$LINK_SYSTEM_SOURCE"
+    [ ! -L "$LINK_SOURCE" ] && ln -s "./_verified/${VERIFIED_MD5SUM}" "$LINK_SOURCE"
+done
+
+echo "$GOOD_FILES" > "${TEMP}/good"
+echo "$BAD_FILES" > "${TEMP}/bad"
+
+
+mlr --tsv uniq -c -g verified_system "${TEMP}/verified" > "${TEMP}/systems_count"
+
+mlr --ijson --otsv \
+    uniq -g verified_system,verified_md5sum then \
+    uniq -c -g verified_system \
+    "${TEMP}/good" > "${TEMP}/good_count"
+
+mlr --tsv join -f "${TEMP}/systems_count" -j verified_system,count then uniq -g verified_system "${TEMP}/good_count" > "${BIOS_PATH}/_bios_set_complete.txt"
+mlr --tsv join --ul --np -f "${TEMP}/systems_count" -j verified_system then uniq -g verified_system "${TEMP}/good_count" > "${BIOS_PATH}/_bios_set_missing.txt"
+mlr --tsv cat "${BIOS_PATH}/_bios_set_complete.txt" "${BIOS_PATH}/_bios_set_missing.txt" > "${TEMP}/_temp"
+mlr --itsv --ojsonl cat "${TEMP}/verified" > "${TEMP}/verified.json"
+mlr --ijsonl --otsv \
+    join -f "${TEMP}/verified.json" -j verified_system,verified_md5sum --ul --np \
+    "${TEMP}/good" > "${TEMP}/all_missing_roms.tsv"
+
+mlr --tsv \
+    join -f "${BIOS_PATH}/_bios_set_missing.txt" -j verified_system --ur --np \
+    "${TEMP}/all_missing_roms.tsv" > "${BIOS_PATH}/_bios_set_incomplete.txt"
+
+rsync -a "${TEMP}/" temp/
+echo DONE
+
+
+# mlr --ijsonl --otsv unsparsify
+# mlr --tsv cat "${TEMP}/local"
+# mlr --tsv cat "${TEMP}/verified"
