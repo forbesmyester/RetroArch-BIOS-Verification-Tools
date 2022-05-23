@@ -3,6 +3,7 @@
 OPTIND=1
 BIOS_PATH=""
 RETROARCH_DOCS_REPO_PATH=""
+EXTRA_DOCS_REPO_PATH=""
 TEMP=""
 
 declare -A COMPLETED_LOCAL_FILES
@@ -18,12 +19,13 @@ show_help() {
     echo "$0 [-d RETROARCH_DOCS_REPO_PATH] [-b BIOS_PATH] [-h]"
     echo ""
     echo "-d = The path to the RetroArch docs repository (from https://github.com/libretro/docs)"
+    echo "-e = The path to the RetroArch docs repository (from https://github.com/libretro/docs)"
     echo "-b = The path to where the BIOS files are stored"
     echo "-h = Show this help"
     echo ""
 }
 
-while getopts "hd:b:" opt; do
+while getopts "he:d:b:" opt; do
     case "$opt" in
         h)
             show_help
@@ -32,6 +34,8 @@ while getopts "hd:b:" opt; do
         b)  BIOS_PATH="$OPTARG"
             ;;
         d)  RETROARCH_DOCS_REPO_PATH="$OPTARG"
+            ;;
+        e)  EXTRA_DOCS_REPO_PATH="$OPTARG"
             ;;
     esac
 done
@@ -48,7 +52,11 @@ TEMP="$(mktemp -d)"
 
 echo -e "local_md5sum\tlocal_filename" > "${TEMP}/local"
 find "$BIOS_PATH" -type f | parallel --halt now,fail=1 md5sum {} | sed 's/ \+/\t/' >> "${TEMP}/local"
-awk -F "|" -f extract_tables.awk "${RETROARCH_DOCS_REPO_PATH}"/docs/library/*.md >> "${TEMP}/verified"
+if [ ! -z "${EXTRA_DOCS_REPO_PATH}" ]; then
+    awk -F "|" -f extract_tables.awk "${RETROARCH_DOCS_REPO_PATH}"/docs/library/*.md "${EXTRA_DOCS_REPO_PATH}"/*.md >> "${TEMP}/verified"
+else
+    awk -F "|" -f extract_tables.awk "${RETROARCH_DOCS_REPO_PATH}"/docs/library/*.md >> "${TEMP}/verified"
+fi
 
 
 DESTINATION_PATH="${BIOS_PATH}/_verified"
@@ -97,8 +105,10 @@ for O in $GOOD_FILES; do
 
     mkdir -p "$(dirname $LINK_SYSTEM_SOURCE)"
     mkdir -p "$(dirname $LINK_SOURCE)"
-    [ ! -L "$LINK_SYSTEM_SOURCE" ] && ln -s "../_verified/${VERIFIED_MD5SUM}" "$LINK_SYSTEM_SOURCE"
-    [ ! -L "$LINK_SOURCE" ] && ln -s "./_verified/${VERIFIED_MD5SUM}" "$LINK_SOURCE"
+    [ ! -L "$LINK_SYSTEM_SOURCE" ] && ln -s --relative "${DESTINATION_FILE}" "$LINK_SYSTEM_SOURCE"
+    if [ "$(realpath "$BIOS_PATH")" == "$(realpath "$(dirname "$LINK_SOURCE")")" ]; then
+        [ ! -L "$LINK_SOURCE" ] && ln -s --relative "${DESTINATION_FILE}" "$LINK_SOURCE"
+    fi
 done
 
 echo "$GOOD_FILES" > "${TEMP}/good"

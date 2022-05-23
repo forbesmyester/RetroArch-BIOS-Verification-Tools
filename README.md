@@ -4,8 +4,8 @@ see organize_retroarch_bios which should be ran like
 
 ```
 git clone https://github.com/libretro/docs.git docs
-mkdir BIOS_FILES # Put your classic BIOS files in here
-./organize_retroarch_bios -d docs -b BIOS_FILES
+mkdir -p BIOS # Put your classic BIOS files in here
+./organize_retroarch_bios -d docs -e ./extra_bios_docs/ -b BIOS
 ```
 
 This will then
